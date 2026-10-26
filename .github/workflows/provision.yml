@@ -1,0 +1,57 @@
+name: Reintentar Aprovisionamiento OCI
+
+on:
+  schedule:
+    # Se ejecuta automáticamente cada 30 minutos
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Permite lanzarlo a mano cuando quieras
+
+jobs:
+  apply-stack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar OCI CLI
+        run: |
+          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+          echo "/home/runner/bin" >> $GITHUB_PATH
+
+      - name: Configurar credenciales OCI
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_KEY_FILE }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          cat <<EOF > ~/.oci/config
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_OCID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          key_file=~/.oci/oci_api_key.pem
+          tenancy=${{ secrets.OCI_TENANCY_OCID }}
+          region=${{ secrets.OCI_REGION }}
+          EOF
+
+      - name: Lanzar Job Apply en el Stack
+        run: |
+          echo "Creando Job de Apply en el Stack..."
+          JOB_ID=$(oci resource-manager job create-apply-job \
+            --stack-id "${{ secrets.OCI_STACK_OCID }}" \
+            --execution-plan-strategy "AUTO_APPROVED" \
+            --query "data.id" \
+            --raw-output)
+
+          echo "Job creado con ID: $JOB_ID"
+          echo "Esperando resolución del hipervisor..."
+
+          # Esperar a que el job termine (SUCCEEDED o FAILED)
+          oci resource-manager job get --job-id "$JOB_ID" --wait-for-state SUCCEEDED --wait-for-state FAILED --wait-interval-seconds 5
+
+          STATUS=$(oci resource-manager job get --job-id "$JOB_ID" --query "data.\"lifecycle-state\"" --raw-output)
+          echo "Estado final del job: $STATUS"
+
+          if [ "$STATUS" = "SUCCEEDED" ]; then
+            echo "¡Servidor aprovisionado con éxito!"
+            exit 0
+          else
+            echo "Sin capacidad libre en Madrid. Reintentará en la próxima ronda."
+            exit 0
+          fi
