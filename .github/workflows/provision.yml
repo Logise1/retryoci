@@ -2,7 +2,7 @@ name: Reintentar Aprovisionamiento OCI
 
 on:
   schedule:
-    # Se dispara automáticamente cada 30 minutos
+    # Se ejecuta automáticamente cada 30 minutos
     - cron: '*/30 * * * *'
   workflow_dispatch: # Permite lanzarlo a mano cuando quieras
 
@@ -37,23 +37,42 @@ jobs:
           OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
           SUPPRESS_LABEL_WARNING: "True"
         run: |
-          # Intentar durante 25 rondas seguidas (aproximadamente 25 minutos de intentos activos)
-          for ronda in {1..25}; do
+          # 10 rondas con pausa segura para evitar el límite 429 de Oracle
+          for ronda in {1..10}; do
             echo "============================================="
             echo "Iniciando intento #$ronda..."
             echo "============================================="
 
-            JOB_ID=$(oci resource-manager job create-apply-job \
+            # Ejecutar el apply-job capturando salida y errores
+            JOB_OUTPUT=$(oci resource-manager job create-apply-job \
               --stack-id "${{ secrets.OCI_STACK_OCID }}" \
               --execution-plan-strategy "AUTO_APPROVED" \
               --query "data.id" \
-              --raw-output)
+              --raw-output 2>&1) || true
 
-            echo "Job creado: $JOB_ID"
+            # Si Oracle devuelve TooManyRequests (429), aplicar enfriamiento
+            if echo "$JOB_OUTPUT" | grep -q "TooManyRequests"; then
+              echo "Aviso: Límite de peticiones de Oracle alcanzado (429 TooManyRequests)."
+              echo "Esperando 180 segundos de enfriamiento..."
+              sleep 180
+              continue
+            fi
 
-            # Esperar resolución del job actual
+            # Si devuelve cualquier otro error y no contiene un OCID válido
+            if ! echo "$JOB_OUTPUT" | grep -q "ocid1.ormjob"; then
+              echo "Error al crear job: $JOB_OUTPUT"
+              echo "Esperando 120 segundos antes de reintentar..."
+              sleep 120
+              continue
+            fi
+
+            JOB_ID="$JOB_OUTPUT"
+            echo "Job creado con éxito: $JOB_ID"
+            echo "Esperando resolución del hipervisor..."
+
+            # Esperar a que el job termine (SUCCEEDED, FAILED o CANCELED)
             while true; do
-              STATUS=$(oci resource-manager job get --job-id "$JOB_ID" --query "data.\"lifecycle-state\"" --raw-output)
+              STATUS=$(oci resource-manager job get --job-id "$JOB_ID" --query "data.\"lifecycle-state\"" --raw-output 2>/dev/null) || STATUS="UNKNOWN"
               echo "Estado: $STATUS"
 
               if [ "$STATUS" = "SUCCEEDED" ]; then
@@ -63,11 +82,11 @@ jobs:
                 echo "Intento fallido sin capacidad."
                 break
               fi
-              sleep 5
+              sleep 10
             done
 
-            echo "Esperando 60 segundos antes del siguiente intento..."
-            sleep 60
+            echo "Esperando 120 segundos para el siguiente intento..."
+            sleep 120
           done
 
-          echo "Ronda de 25 minutos completada. El workflow finalizará y esperará al siguiente ciclo."
+          echo "Fin de la tanda programada. El workflow finalizará y esperará al siguiente ciclo automático."
