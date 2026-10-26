@@ -25,12 +25,17 @@ jobs:
           [DEFAULT]
           user=${{ secrets.OCI_USER_OCID }}
           fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          key_file=~/.oci/oci_api_key.pem
+          key_file=/home/runner/.oci/oci_api_key.pem
           tenancy=${{ secrets.OCI_TENANCY_OCID }}
           region=${{ secrets.OCI_REGION }}
           EOF
 
+          chmod 600 ~/.oci/config
+
       - name: Lanzar Job Apply en el Stack
+        env:
+          OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
+          SUPPRESS_LABEL_WARNING: "True"
         run: |
           echo "Creando Job de Apply en el Stack..."
           JOB_ID=$(oci resource-manager job create-apply-job \
@@ -40,18 +45,23 @@ jobs:
             --raw-output)
 
           echo "Job creado con ID: $JOB_ID"
-          echo "Esperando resolución del hipervisor..."
+          echo "Esperando resolucion del hipervisor..."
 
-          # Esperar a que el job termine (SUCCEEDED o FAILED)
-          oci resource-manager job get --job-id "$JOB_ID" --wait-for-state SUCCEEDED --wait-for-state FAILED --wait-interval-seconds 5
+          # Bucle de espera manual hasta que el estado no sea ni ACCEPTED ni IN_PROGRESS
+          while true; do
+            STATUS=$(oci resource-manager job get --job-id "$JOB_ID" --query "data.\"lifecycle-state\"" --raw-output)
+            echo "Estado actual: $STATUS"
 
-          STATUS=$(oci resource-manager job get --job-id "$JOB_ID" --query "data.\"lifecycle-state\"" --raw-output)
-          echo "Estado final del job: $STATUS"
+            if [ "$STATUS" = "SUCCEEDED" ]; then
+              echo "¡Servidor aprovisionado con exito!"
+              exit 0
+            elif [ "$STATUS" = "FAILED" ]; then
+              echo "Sin capacidad libre en Madrid (Out of host capacity). Reintentara en la proxima ronda."
+              exit 0
+            elif [ "$STATUS" = "CANCELED" ]; then
+              echo "El trabajo fue cancelado."
+              exit 0
+            fi
 
-          if [ "$STATUS" = "SUCCEEDED" ]; then
-            echo "¡Servidor aprovisionado con éxito!"
-            exit 0
-          else
-            echo "Sin capacidad libre en Madrid. Reintentará en la próxima ronda."
-            exit 0
-          fi
+            sleep 5
+          done
